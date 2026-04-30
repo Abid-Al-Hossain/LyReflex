@@ -88,11 +88,16 @@ export default function Home() {
         }));
       }
 
-      setStatusMsg(`Fetching visuals for ${phrases.length} moments…`);
+      setStatusMsg(`Generating AI visuals for ${phrases.length} moments…`);
       const enriched = await Promise.all(
-        phrases.map(async (p) => {
+        phrases.map(async (p, idx) => {
           const url = await fetchImage(p.keyword).catch(() => "");
-          if (url) preCacheImage(url);
+          // Await the very first image so the initial screen isn't blank
+          if (url && idx === 0) {
+            await preCacheImage(url);
+          } else if (url) {
+            preCacheImage(url); // Let others load in background
+          }
           return { ...p, imageUrl: url };
         })
       );

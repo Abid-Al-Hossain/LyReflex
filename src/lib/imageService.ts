@@ -71,31 +71,24 @@ async function fetchPexels(query: string): Promise<string | null> {
   }
 }
 
-/** Curated fallback map for common music themes when no API key is configured */
-const THEME_FALLBACKS: Record<string, string> = {
-  default:      "https://images.unsplash.com/photo-1534796636912-3b95b3ab5986?w=1400&q=85",
-  space:        "https://images.unsplash.com/photo-1462331940025-496dfbfc7564?w=1400&q=85",
-  ocean:        "https://images.unsplash.com/photo-1505118380757-91f5f5632de0?w=1400&q=85",
-  forest:       "https://images.unsplash.com/photo-1448375240586-882707db888b?w=1400&q=85",
-  city:         "https://images.unsplash.com/photo-1477959858617-67f85cf4f1df?w=1400&q=85",
-  sunset:       "https://images.unsplash.com/photo-1500534314209-a25ddb2bd429?w=1400&q=85",
-  rain:         "https://images.unsplash.com/photo-1501999635878-71cb5379c2d8?w=1400&q=85",
-  fire:         "https://images.unsplash.com/photo-1515879218367-8466d910aaa4?w=1400&q=85",
-  love:         "https://images.unsplash.com/photo-1518199266791-5375a83190b7?w=1400&q=85",
-  mountain:     "https://images.unsplash.com/photo-1464822759023-fed622ff2c3b?w=1400&q=85",
-};
-
-function getThemeFallback(keyword: string): string {
-  const lower = keyword.toLowerCase();
-  for (const [theme, url] of Object.entries(THEME_FALLBACKS)) {
-    if (lower.includes(theme)) return url;
-  }
-  return THEME_FALLBACKS.default;
+/**
+ * Generates a prompt-based AI image using Pollinations.ai.
+ * This guarantees a highly relevant, cinematic image based on the lyric phrase.
+ */
+function getPollinationsImage(keyword: string): string {
+  // Add styling keywords to ensure consistent, cinematic, dark-themed visuals
+  // nologo=true removes the watermark
+  const prompt = `${keyword}, cinematic photography, dark moody lighting, highly detailed, 4k`;
+  const encoded = encodeURIComponent(prompt.trim());
+  const seed = Math.floor(Math.random() * 100000);
+  return `https://image.pollinations.ai/prompt/${encoded}?width=1280&height=720&nologo=true&seed=${seed}`;
 }
 
 /**
  * Main image fetch function:
- * Tries Pixabay → Pexels → curated fallback
+ * 1. Tries Pixabay (if key provided)
+ * 2. Tries Pexels (if key provided)
+ * 3. Uses Pollinations.ai Generative AI (zero config, highly relevant)
  */
 export async function fetchImage(keyword: string): Promise<string> {
   const pixabayResult = await fetchPixabay(keyword);
@@ -104,15 +97,19 @@ export async function fetchImage(keyword: string): Promise<string> {
   const pexelsResult = await fetchPexels(keyword);
   if (pexelsResult) return pexelsResult;
 
-  // Graceful degradation: themed static fallbacks
-  return getThemeFallback(keyword);
+  // Generative AI fallback — creates exactly what the lyrics describe!
+  return getPollinationsImage(keyword);
 }
 
-/** Forces browser to pre-download image into its cache */
-export function preCacheImage(url: string): void {
-  if (typeof window === "undefined") return;
-  const img = new window.Image();
-  img.src = url;
+/** Forces browser to pre-download image into its cache and returns a Promise */
+export function preCacheImage(url: string): Promise<void> {
+  if (typeof window === "undefined") return Promise.resolve();
+  return new Promise((resolve) => {
+    const img = new window.Image();
+    img.onload  = () => resolve();
+    img.onerror = () => resolve(); // Resolve anyway so it doesn't block the app
+    img.src = url;
+  });
 }
 
 /** Clear the in-memory cache (e.g., between songs) */
