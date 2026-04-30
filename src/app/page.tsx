@@ -89,18 +89,30 @@ export default function Home() {
       }
 
       setStatusMsg(`Generating AI visuals for ${phrases.length} moments…`);
+      
+      // 1. Resolve URLs synchronously (since Pollinations URL generation is instant)
       const enriched = await Promise.all(
-        phrases.map(async (p, idx) => {
+        phrases.map(async (p) => {
           const url = await fetchImage(p.keyword).catch(() => "");
-          // Await the very first image so the initial screen isn't blank
-          if (url && idx === 0) {
-            await preCacheImage(url);
-          } else if (url) {
-            preCacheImage(url); // Let others load in background
-          }
           return { ...p, imageUrl: url };
         })
       );
+
+      // 2. Pre-cache ONLY the first image and await it
+      const firstValid = enriched.find((e) => e.imageUrl);
+      if (firstValid?.imageUrl) {
+        await preCacheImage(firstValid.imageUrl);
+      }
+
+      // 3. Sequentially pre-cache the rest in the background to avoid 500 errors
+      // (Firing 60 simultaneous generation requests crashes the free AI server)
+      const otherUrls = enriched.map(e => e.imageUrl).filter(u => u && u !== firstValid?.imageUrl) as string[];
+      (async () => {
+        for (const u of otherUrls) {
+          // Await each download before starting the next
+          await preCacheImage(u);
+        }
+      })();
 
       lyricsRef.current = enriched;
       setLyrics(enriched);
