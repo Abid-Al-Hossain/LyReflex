@@ -2,7 +2,7 @@ export interface LyricMoment {
   text: string;
   startTime: number;
   endTime: number;
-  keyword: string;
+  keyword: string;  // 2-3 word concrete visual term used for both Giphy and Pixabay
   imageUrl?: string;
 }
 

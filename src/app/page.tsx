@@ -70,8 +70,8 @@ export default function Home() {
   const lastLyricRef            = useRef<LyricMoment | null>(null);
   const lyricsRef               = useRef<LyricMoment[]>([]);
 
-  /* Rolling loader */
-  const isLoadingRef            = useRef<boolean>(false);
+  /* Rolling loader — tracks which indices are currently in-flight */
+  const inFlightRef             = useRef<Set<number>>(new Set());
   const loadedSetRef            = useRef<Set<number>>(new Set());
 
   /* FIX 1: Track the index of the CURRENTLY PLAYING phrase.
@@ -157,7 +157,7 @@ export default function Home() {
     /* Full reset of all refs */
     lastLyricRef.current         = null;
     activeLayerRef.current       = "a";
-    isLoadingRef.current         = false;
+    inFlightRef.current          = new Set();
     loadedSetRef.current         = new Set();
     currentPhraseIdxRef.current  = -1;
     lastTimeRef.current          = -1;
@@ -211,7 +211,7 @@ export default function Home() {
          load that's now irrelevant.
        → Null lastLyricRef to force re-evaluation at the new position. */
     if (prev >= 0 && Math.abs(time - prev) > SEEK_THRESHOLD) {
-      isLoadingRef.current  = false;
+      inFlightRef.current.clear(); // abandon stale in-flight loads
       lastLyricRef.current  = null;
     }
 
@@ -236,23 +236,22 @@ export default function Home() {
       setCurrentLyric(null);
     }
 
-    /* ── 2. Rolling loader ────────────────────────────────────────────────── */
-    if (!isLoadingRef.current) {
-      const target = phrases.find(
-        (p, i) =>
-          p.startTime > time &&
-          p.startTime - time <= LOOKAHEAD_SECS &&
-          !loadedSetRef.current.has(i)
-      );
-
-      if (target) {
-        const idx = phrases.indexOf(target);
-        isLoadingRef.current = true;
-        loadVisualForIndex(idx).then(() => {
-          isLoadingRef.current = false;
+    /* ── 2. Rolling parallel loader ──────────────────────────────────────── */
+    // Find ALL unloaded phrases within the lookahead window and start
+    // loading them in parallel. Each phrase tracks itself via inFlightRef.
+    phrases.forEach((p, i) => {
+      if (
+        p.startTime > time &&
+        p.startTime - time <= LOOKAHEAD_SECS &&
+        !loadedSetRef.current.has(i) &&
+        !inFlightRef.current.has(i)
+      ) {
+        inFlightRef.current.add(i);
+        loadVisualForIndex(i).then(() => {
+          inFlightRef.current.delete(i);
         });
       }
-    }
+    });
   }, [loadVisualForIndex, crossfadeTo]);
 
   /* ── Reset ──────────────────────────────────────────────────────────────── */
@@ -268,7 +267,7 @@ export default function Home() {
     activeLayerRef.current       = "a";
     lastLyricRef.current         = null;
     lyricsRef.current            = [];
-    isLoadingRef.current         = false;
+    inFlightRef.current          = new Set();
     loadedSetRef.current         = new Set();
     currentPhraseIdxRef.current  = -1;
     lastTimeRef.current          = -1;

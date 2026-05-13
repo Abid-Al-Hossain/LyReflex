@@ -28,9 +28,14 @@ async function transcribeWithGroq(
 
   const form = new FormData();
   form.append("file",  file);
-  form.append("model", "whisper-large-v3");
+  form.append("model", "whisper-large-v3"); // most accurate model on Groq
   form.append("response_format", "verbose_json");
   form.append("timestamp_granularities[]", "word");
+  // NOTE: We intentionally do NOT set a `prompt` parameter.
+  // Whisper treats the prompt as "previous transcript text" and will copy
+  // words from it directly into the output, causing hallucination.
+  // whisper-large-v3 auto-detects language and content type accurately
+  // without any priming — works correctly for songs, lectures, podcasts, etc.
 
   const res = await fetch(
     "https://api.groq.com/openai/v1/audio/transcriptions",
@@ -49,6 +54,7 @@ async function transcribeWithGroq(
   // Groq returned text only — distribute evenly
   return distributeWordsEvenly(data.text ?? "", 0);
 }
+
 
 /* ── HuggingFace Inference API (zero-config fallback) ────────────────────────
  * Runs server-side Whisper. Free, no key, ~15-30 s.

@@ -27,6 +27,20 @@ const mediaCache = new Map<string, string>();
 /* ══════════════════════════════════════════════════════════════════════════ */
 
 /* ── Giphy ────────────────────────────────────────────────────────────────── */
+/**
+ * Giphy search with relevance filtering.
+ * Their search often returns birthday/meme GIFs for music-related queries.
+ * We filter those out by checking the GIF's title/slug for known spam words.
+ */
+const GIPHY_SPAM = [
+  "birthday", "happy birthday", "congratulations", "congrats",
+  "new year", "christmas", "easter", "valentine",
+  "thank you", "thanks", "welcome", "goodbye", "bye",
+  "good morning", "good night", "get well",
+  "i love you", "miss you",
+  "minion", "spongebob",
+];
+
 async function fetchGiphy(query: string): Promise<string | null> {
   const key = getKey("lyreflex_giphy_key");
   if (!key) return null;
@@ -35,15 +49,27 @@ async function fetchGiphy(query: string): Promise<string | null> {
   if (mediaCache.has(cacheKey)) return mediaCache.get(cacheKey)!;
 
   try {
-    const url = `https://api.giphy.com/v1/gifs/search?api_key=${key}&q=${encodeURIComponent(query)}&limit=8&rating=pg&lang=en`;
+    // Fetch 15 results to have enough candidates after filtering
+    const url = `https://api.giphy.com/v1/gifs/search?api_key=${key}&q=${encodeURIComponent(query)}&limit=15&rating=pg&lang=en`;
     const res = await fetch(url, { signal: AbortSignal.timeout(6_000) });
     if (!res.ok) return null;
 
     const json = await res.json();
-    const gifs = json.data ?? [];
+    const gifs = (json.data ?? []) as Array<{
+      title?: string;
+      slug?: string;
+      images?: { fixed_width?: { url: string }; original?: { url: string } };
+    }>;
     if (gifs.length === 0) return null;
 
-    const pick = gifs[Math.floor(Math.random() * Math.min(gifs.length, 5))];
+    // Filter out spam GIFs by title/slug
+    const clean = gifs.filter((g) => {
+      const titleSlug = `${g.title ?? ""} ${g.slug ?? ""}`.toLowerCase();
+      return !GIPHY_SPAM.some((spam) => titleSlug.includes(spam));
+    });
+
+    const pool = clean.length > 0 ? clean : gifs; // fall back to unfiltered if all filtered
+    const pick = pool[Math.floor(Math.random() * Math.min(pool.length, 5))];
     const gifUrl = (pick.images?.fixed_width?.url ?? pick.images?.original?.url ?? "") as string;
 
     if (gifUrl) {
@@ -127,8 +153,8 @@ function getPicsumFallback(keyword: string): string {
 /**
  * Fetch a visual (GIF or Image) for the given keyword.
  *
- * GIF mode:   Giphy → Pixabay → Wikipedia → Picsum
- * Image mode: Pixabay → Wikipedia → Picsum
+ * GIF mode:   Giphy (2-3 word keyword) → Pixabay → Wikipedia → Picsum
+ * Image mode: Pixabay                  → Wikipedia → Picsum
  */
 export async function fetchVisual(keyword: string, mode: VisualMode): Promise<string> {
   if (mode === "gif") {
