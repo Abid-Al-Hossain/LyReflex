@@ -6,14 +6,14 @@ import Uploader      from "@/components/Uploader";
 import Visualizer    from "@/components/Visualizer";
 import AudioPlayer   from "@/components/AudioPlayer";
 import GroqKeyModal, { useGroqKey } from "@/components/GroqKeyModal";
-import { LyricMoment, AppState } from "@/types";
-import { fetchImage, clearImageCache } from "@/lib/imageService";
+import { LyricMoment, AppState, VisualMode } from "@/types";
+import { fetchVisual, clearMediaCache } from "@/lib/imageService";
 import { getSemanticPhrases } from "@/lib/phraseService";
 import { transcribeAudio, TranscriptWord } from "@/lib/transcription";
 
 /* ─── Constants ───────────────────────────────────────────────────────────── */
 /**
- * How many seconds ahead of a phrase's startTime we begin loading its image.
+ * How many seconds ahead of a phrase's startTime we begin loading its visual.
  * 15s gives enough time to fetch even slow Wikipedia images.
  * Fully time-driven — works for both slow ballads and fast rap.
  */
@@ -41,6 +41,10 @@ export default function Home() {
   const [statusMsg,    setStatusMsg]    = useState("Starting…");
   const [showKeyModal, setShowKeyModal] = useState(false);
 
+  /* Visual mode — persisted in state, user toggles before upload */
+  const [visualMode, setVisualMode] = useState<VisualMode>("gif");
+  const visualModeRef = useRef<VisualMode>("gif");
+
   /* Groq key from localStorage */
   const { key: groqKey, setKey: setGroqKey } = useGroqKey();
 
@@ -52,21 +56,27 @@ export default function Home() {
   const lastLyricRef   = useRef<LyricMoment | null>(null);
   const lyricsRef      = useRef<LyricMoment[]>([]);
 
-  /* Rolling image loader — tracks which phrase is currently being fetched */
-  const isLoadingRef   = useRef<boolean>(false);
-  /** Set of phrase indices currently in-flight or already loaded */
-  const loadedSetRef   = useRef<Set<number>>(new Set());
+  /* Rolling loader state */
+  const isLoadingRef = useRef<boolean>(false);
+  const loadedSetRef = useRef<Set<number>>(new Set());
 
-  /* ── Image loader helper ─────────────────────────────────────────────────── */
-  const loadImageForIndex = useCallback(async (index: number): Promise<void> => {
+  /* ── Mode toggle handler ─────────────────────────────────────────────────── */
+  const handleModeChange = useCallback((mode: VisualMode) => {
+    setVisualMode(mode);
+    visualModeRef.current = mode;
+  }, []);
+
+  /* ── Visual loader helper ────────────────────────────────────────────────── */
+  const loadVisualForIndex = useCallback(async (index: number): Promise<void> => {
     const phrases = lyricsRef.current;
     if (index >= phrases.length) return;
-    if (loadedSetRef.current.has(index)) return; // already loaded or in-flight
+    if (loadedSetRef.current.has(index)) return;
 
-    loadedSetRef.current.add(index); // mark in-flight immediately
+    loadedSetRef.current.add(index);
 
     const keyword = phrases[index].keyword;
-    const url     = await fetchImage(keyword).catch(() => "");
+    const mode    = visualModeRef.current;
+    const url     = await fetchVisual(keyword, mode).catch(() => "");
 
     if (url) {
       const updated = [...lyricsRef.current];
@@ -74,7 +84,7 @@ export default function Home() {
       lyricsRef.current = updated;
       setLyrics([...updated]);
 
-      // Set the initial background layer from the very first image that arrives
+      // Set initial background from the very first visual
       if (!layerA) {
         setLayerA(url);
         activeLayerRef.current = "a";
@@ -85,12 +95,11 @@ export default function Home() {
 
   /* ── File selected ──────────────────────────────────────────────────────── */
   const handleFileSelect = useCallback(async (file: File) => {
-    // Reset everything
     setAudioFile(file);
     setAudioSrc(URL.createObjectURL(file));
     setAppState("processing");
     setStatusMsg("Reading audio…");
-    clearImageCache();
+    clearMediaCache();
     lastLyricRef.current   = null;
     activeLayerRef.current = "a";
     isLoadingRef.current   = false;
@@ -104,7 +113,6 @@ export default function Home() {
     try {
       const duration = await getAudioDuration(file);
 
-      /* Read key from localStorage (most up-to-date at call time) */
       const lsKey = typeof window !== "undefined"
         ? localStorage.getItem("lyreflex_groq_key") ?? undefined
         : undefined;
@@ -116,20 +124,15 @@ export default function Home() {
       setStatusMsg("Analysing lyrics…");
       const phrases = await getSemanticPhrases(words, lsKey ?? null, duration);
 
-      // Store all phrases immediately (images empty for now)
       lyricsRef.current = phrases;
       setLyrics([...phrases]);
 
-      /* ── Step 3: Pre-load image 0 only, so there's something visible immediately ── */
-      setStatusMsg("Loading first visual…");
-      await loadImageForIndex(0);
+      /* ── Step 3: Pre-load first visual ───────────────────────────────────── */
+      const modeLabel = visualModeRef.current === "gif" ? "GIF" : "image";
+      setStatusMsg(`Loading first ${modeLabel}…`);
+      await loadVisualForIndex(0);
 
-      /* ── Step 4: Show the player — time-driven loader takes over ────────── */
-      // From here, handleTimeUpdate fires every ~250ms and loads images
-      // for any phrase whose startTime is within LOOKAHEAD_SECS of the
-      // current playback position. This is correct for both slow ballads
-      // and fast rap — images are fetched at exactly the right moment,
-      // not on an arbitrary fixed timer.
+      /* ── Step 4: Show player — time-driven loader takes over ─────────────── */
       setAppState("playing");
       setStatusMsg("");
 
@@ -137,13 +140,13 @@ export default function Home() {
       const msg = err instanceof Error ? err.message : String(err);
       setStatusMsg(`Error: ${msg}`);
     }
-  }, [loadImageForIndex]);
+  }, [loadVisualForIndex]);
 
   /* ── Sync engine — runs on every audio tick (~4× per second) ──────────── */
   const handleTimeUpdate = useCallback((time: number) => {
     const phrases = lyricsRef.current;
 
-    /* ── 1. Update currently visible lyric & crossfade image ─────────────── */
+    /* ── 1. Lyric sync + crossfade ─────────────────────────────────────── */
     const lyric = phrases.find((l) => time >= l.startTime && time <= l.endTime) ?? null;
 
     if (lyric && lyric !== lastLyricRef.current) {
@@ -166,30 +169,24 @@ export default function Home() {
       setCurrentLyric(null);
     }
 
-    /* ── 2. Rolling loader: load the NEXT unloaded phrase within lookahead ── */
-    // Only one fetch at a time. We scan forward from the current time
-    // and trigger loading for the closest phrase that's:
-    //   • not yet loaded/in-flight
-    //   • starting within LOOKAHEAD_SECS from now
-    // For fast rap (0.5s phrases) and slow ballads alike, this ensures
-    // the image is fetching well before it's needed on screen.
+    /* ── 2. Rolling loader — driven by audio timestamp ─────────────────── */
     if (!isLoadingRef.current) {
       const target = phrases.find(
         (p, i) =>
-          p.startTime > time &&                          // not yet playing
-          p.startTime - time <= LOOKAHEAD_SECS &&        // within lookahead window
-          !loadedSetRef.current.has(i)                   // not already loading/loaded
+          p.startTime > time &&
+          p.startTime - time <= LOOKAHEAD_SECS &&
+          !loadedSetRef.current.has(i)
       );
 
       if (target) {
         const idx = phrases.indexOf(target);
         isLoadingRef.current = true;
-        loadImageForIndex(idx).then(() => {
+        loadVisualForIndex(idx).then(() => {
           isLoadingRef.current = false;
         });
       }
     }
-  }, [loadImageForIndex]);
+  }, [loadVisualForIndex]);
 
   /* ── Reset ──────────────────────────────────────────────────────────────── */
   const handleReset = useCallback(() => {
@@ -203,10 +200,10 @@ export default function Home() {
     setActiveLayer("a");
     activeLayerRef.current = "a";
     lastLyricRef.current   = null;
-    lyricsRef.current    = [];
-    isLoadingRef.current = false;
-    loadedSetRef.current = new Set();
-    clearImageCache();
+    lyricsRef.current      = [];
+    isLoadingRef.current   = false;
+    loadedSetRef.current   = new Set();
+    clearMediaCache();
   }, []);
 
   /* ── Upload screen ──────────────────────────────────────────────────────── */
@@ -215,6 +212,25 @@ export default function Home() {
       <div className="page-wrapper">
         <Navbar onKeyClick={() => setShowKeyModal(true)} groqKeySet={!!groqKey} />
         <Uploader onUpload={handleFileSelect} />
+
+        {/* Visual mode toggle */}
+        <div className="mode-toggle-wrap">
+          <span className="mode-toggle-label">Visual style</span>
+          <div className="mode-toggle">
+            <button
+              className={`mode-btn ${visualMode === "gif" ? "mode-btn--active" : ""}`}
+              onClick={() => handleModeChange("gif")}
+            >
+              <span className="mode-icon">🎞️</span> GIFs
+            </button>
+            <button
+              className={`mode-btn ${visualMode === "image" ? "mode-btn--active" : ""}`}
+              onClick={() => handleModeChange("image")}
+            >
+              <span className="mode-icon">🖼️</span> Images
+            </button>
+          </div>
+        </div>
 
         {/* Groq callout banner */}
         <div className="groq-banner">

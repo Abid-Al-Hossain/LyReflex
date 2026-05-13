@@ -1,36 +1,90 @@
 /**
- * LyReflex Image Service
+ * LyReflex — Visual Media Service
  *
- * Priority:
- * 1. Pixabay    — relevant photos, 5,000 req/hr (requires free API key)
- * 2. Pexels     — relevant photos, 200 req/hr  (requires free API key)
- * 3. Wikipedia  — FREE, no key, semantically relevant. Searches Wikipedia
- *                 articles by keyword and returns the article's lead image.
- *                 "starboy" → The Weeknd photo, "Rolls Royce" → car photo,
- *                 "prayer" → prayer image, "money" → cash photo, etc.
- * 4. Picsum     — seeded abstract fallback (always works)
+ * Two modes controlled by user preference:
+ *
+ * GIF MODE  →  Giphy API  (world's largest GIF library, free beta key)
+ *              Endpoint: https://api.giphy.com/v1/gifs/search
+ *              Rate: 100 req/hr (beta), plenty for time-driven rolling buffer
+ *              Returns animated GIFs that feel alive with the music
+ *
+ * IMAGE MODE → Pixabay API (high-quality stock photos, free key)
+ *              Endpoint: https://pixabay.com/api/
+ *              Rate: 5,000 req/hr (generous)
+ *              Returns cinematic-quality still photos
+ *
+ * Fallback cascade (both modes):
+ *   1. Primary API (Giphy/Pixabay depending on mode)
+ *   2. Pexels (good photo fallback)
+ *   3. Wikipedia (free, no key, always works)
+ *   4. Picsum (seeded abstract placeholder, never fails)
  */
+
+export type VisualMode = "gif" | "image";
 
 const PIXABAY_KEY = process.env.NEXT_PUBLIC_PIXABAY_API_KEY || "";
 const PEXELS_KEY  = process.env.NEXT_PUBLIC_PEXELS_API_KEY  || "";
+const GIPHY_KEY   = process.env.NEXT_PUBLIC_GIPHY_API_KEY   || "";
 
-/** In-memory cache so we never fetch the same keyword twice per session */
-const imageCache = new Map<string, string>();
+/** In-memory cache — key includes mode so gif/image don't collide */
+const mediaCache = new Map<string, string>();
+
+/* ══════════════════════════════════════════════════════════════════════════ */
+/*  GIF PROVIDERS                                                            */
+/* ══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Giphy ────────────────────────────────────────────────────────────────── */
+/**
+ * World's largest GIF search. Free beta key: 100 req/hr.
+ * Returns the `fixed_width` rendition — optimized for web, ~200-500KB per GIF.
+ * Using `rating=pg` to keep it safe.
+ */
+async function fetchGiphy(query: string): Promise<string | null> {
+  if (!GIPHY_KEY) return null;
+  const cacheKey = `giphy:${query}`;
+  if (mediaCache.has(cacheKey)) return mediaCache.get(cacheKey)!;
+
+  try {
+    const url = `https://api.giphy.com/v1/gifs/search?api_key=${GIPHY_KEY}&q=${encodeURIComponent(query)}&limit=8&rating=pg&lang=en`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(6_000) });
+    if (!res.ok) return null;
+
+    const json = await res.json();
+    const gifs = json.data ?? [];
+    if (gifs.length === 0) return null;
+
+    // Pick from the top 5 for variety
+    const pick = gifs[Math.floor(Math.random() * Math.min(gifs.length, 5))];
+    // Use fixed_width for consistent rendering (not too big, not too small)
+    const gifUrl = (pick.images?.fixed_width?.url ?? pick.images?.original?.url ?? "") as string;
+
+    if (gifUrl) {
+      mediaCache.set(cacheKey, gifUrl);
+      return gifUrl;
+    }
+  } catch { /* swallow */ }
+  return null;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════ */
+/*  IMAGE PROVIDERS                                                          */
+/* ══════════════════════════════════════════════════════════════════════════ */
 
 /* ── Pixabay ──────────────────────────────────────────────────────────────── */
 async function fetchPixabay(query: string): Promise<string | null> {
   if (!PIXABAY_KEY) return null;
   const cacheKey = `pixabay:${query}`;
-  if (imageCache.has(cacheKey)) return imageCache.get(cacheKey)!;
+  if (mediaCache.has(cacheKey)) return mediaCache.get(cacheKey)!;
+
   try {
     const res  = await fetch(
-      `https://pixabay.com/api/?key=${PIXABAY_KEY}&q=${encodeURIComponent(query)}&image_type=photo&orientation=horizontal&safesearch=true&per_page=5&order=popular`
+      `https://pixabay.com/api/?key=${PIXABAY_KEY}&q=${encodeURIComponent(query)}&image_type=photo&orientation=horizontal&safesearch=true&per_page=8&order=popular`
     );
     const data = await res.json();
     if (data.hits?.length > 0) {
-      const url = data.hits[Math.floor(Math.random() * data.hits.length)].largeImageURL as string;
-      imageCache.set(cacheKey, url);
-      return url;
+      const pick = data.hits[Math.floor(Math.random() * Math.min(data.hits.length, 5))];
+      const url  = (pick.largeImageURL ?? pick.webformatURL) as string;
+      if (url) { mediaCache.set(cacheKey, url); return url; }
     }
   } catch { /* swallow */ }
   return null;
@@ -40,7 +94,8 @@ async function fetchPixabay(query: string): Promise<string | null> {
 async function fetchPexels(query: string): Promise<string | null> {
   if (!PEXELS_KEY) return null;
   const cacheKey = `pexels:${query}`;
-  if (imageCache.has(cacheKey)) return imageCache.get(cacheKey)!;
+  if (mediaCache.has(cacheKey)) return mediaCache.get(cacheKey)!;
+
   try {
     const res  = await fetch(
       `https://api.pexels.com/v1/search?query=${encodeURIComponent(query)}&per_page=5`,
@@ -49,34 +104,18 @@ async function fetchPexels(query: string): Promise<string | null> {
     const data = await res.json();
     if (data.photos?.length > 0) {
       const url = data.photos[Math.floor(Math.random() * data.photos.length)].src.large2x as string;
-      imageCache.set(cacheKey, url);
-      return url;
+      if (url) { mediaCache.set(cacheKey, url); return url; }
     }
   } catch { /* swallow */ }
   return null;
 }
 
-/* ── Wikipedia Image API ──────────────────────────────────────────────────── */
-/**
- * Uses the free Wikipedia/MediaWiki API to find the lead image of the article
- * most relevant to the keyword. This gives us high-quality, contextually 
- * accurate photos without any API key or rate limits.
- *
- * Examples:
- *   "Rolls Royce"       → Rolls-Royce Phantom photo
- *   "diamond jewelry"   → Diamond necklace photo
- *   "nightclub"         → Nightclub interior photo
- *   "achievement"       → Trophy/podium photo
- *   "prayer"            → Hands in prayer photo
- *   "money"             → Cash/currency photo
- *   "basketball"        → Basketball on court photo
- */
+/* ── Wikipedia ────────────────────────────────────────────────────────────── */
 async function fetchWikipedia(query: string): Promise<string | null> {
   const cacheKey = `wiki:${query}`;
-  if (imageCache.has(cacheKey)) return imageCache.get(cacheKey)!;
+  if (mediaCache.has(cacheKey)) return mediaCache.get(cacheKey)!;
 
   try {
-    // Step 1: Search Wikipedia for the best matching article title
     const searchUrl = `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(query)}&srlimit=3&format=json&origin=*`;
     const searchRes = await fetch(searchUrl, { signal: AbortSignal.timeout(6_000) });
     if (!searchRes.ok) return null;
@@ -85,55 +124,74 @@ async function fetchWikipedia(query: string): Promise<string | null> {
     const hits = searchData.query?.search ?? [];
     if (hits.length === 0) return null;
 
-    // Step 2: Try the top search results until we find one with a lead image
     for (const hit of hits.slice(0, 3)) {
-      const title      = hit.title as string;
-      const imageUrl   = `https://en.wikipedia.org/w/api.php?action=query&prop=pageimages&titles=${encodeURIComponent(title)}&format=json&pithumbsize=1280&origin=*`;
-      const imageRes   = await fetch(imageUrl, { signal: AbortSignal.timeout(6_000) });
+      const title    = hit.title as string;
+      const imageUrl = `https://en.wikipedia.org/w/api.php?action=query&prop=pageimages&titles=${encodeURIComponent(title)}&format=json&pithumbsize=1280&origin=*`;
+      const imageRes = await fetch(imageUrl, { signal: AbortSignal.timeout(6_000) });
       if (!imageRes.ok) continue;
 
-      const imageData  = await imageRes.json();
-      const pages      = imageData.query?.pages ?? {};
-      const page       = Object.values(pages)[0] as { thumbnail?: { source: string } };
-      const src        = page?.thumbnail?.source;
+      const imageData = await imageRes.json();
+      const pages     = imageData.query?.pages ?? {};
+      const page      = Object.values(pages)[0] as { thumbnail?: { source: string } };
+      const src       = page?.thumbnail?.source;
 
       if (src) {
-        // Upgrade the thumbnail to max resolution by removing the width suffix
-        // e.g. "...320px-foo.jpg" → "...1280px-foo.jpg"
         const hq = src.replace(/\/\d+px-/, "/1280px-");
-        imageCache.set(cacheKey, hq);
+        mediaCache.set(cacheKey, hq);
         return hq;
       }
     }
   } catch { /* swallow */ }
-
   return null;
 }
 
-/* ── Picsum seeded fallback ───────────────────────────────────────────────── */
+/* ── Picsum fallback ──────────────────────────────────────────────────────── */
 function getPicsumFallback(keyword: string): string {
   return `https://picsum.photos/seed/${encodeURIComponent(keyword.toLowerCase().trim() || "music")}/1280/720`;
 }
 
-/* ── Main export ──────────────────────────────────────────────────────────── */
-export async function fetchImage(keyword: string): Promise<string> {
-  // 1. Pixabay (fast, relevant, needs free key)
+/* ══════════════════════════════════════════════════════════════════════════ */
+/*  MAIN EXPORTS                                                             */
+/* ══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * Fetch a visual (GIF or Image) for the given keyword, using the specified mode.
+ *
+ * GIF mode cascade:   Giphy → Pixabay → Wikipedia → Picsum
+ * Image mode cascade: Pixabay → Pexels → Wikipedia → Picsum
+ */
+export async function fetchVisual(keyword: string, mode: VisualMode): Promise<string> {
+  if (mode === "gif") {
+    // 1. Giphy (animated GIFs — the primary source for GIF mode)
+    const giphy = await fetchGiphy(keyword);
+    if (giphy) return giphy;
+
+    // 2. Fall through to image providers if no GIF found
+  }
+
+  // Image cascade (used by both modes as fallback)
   const pixabay = await fetchPixabay(keyword);
   if (pixabay) return pixabay;
 
-  // 2. Pexels (fast, relevant, needs free key)
   const pexels = await fetchPexels(keyword);
   if (pexels) return pexels;
 
-  // 3. Wikipedia (free, no key, semantically accurate images)
   const wiki = await fetchWikipedia(keyword);
   if (wiki) return wiki;
 
-  // 4. Picsum seeded fallback (always works)
   return getPicsumFallback(keyword);
 }
 
-/** Clear the in-memory cache between songs */
-export function clearImageCache(): void {
-  imageCache.clear();
+/** Clear in-memory cache between songs */
+export function clearMediaCache(): void {
+  mediaCache.clear();
+}
+
+/** Check which APIs are configured */
+export function getConfiguredAPIs(): { giphy: boolean; pixabay: boolean; pexels: boolean } {
+  return {
+    giphy:   !!GIPHY_KEY,
+    pixabay: !!PIXABAY_KEY,
+    pexels:  !!PEXELS_KEY,
+  };
 }

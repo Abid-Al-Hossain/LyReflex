@@ -18,7 +18,7 @@ export default function Navbar({ onKeyClick, groqKeySet }: NavbarProps) {
         <div className="navbar-right">
           <div className="api-badge">
             <span className="api-dot" />
-            <span>Pixabay · Pexels</span>
+            <span>Giphy · Pixabay · Pexels</span>
           </div>
 
           {onKeyClick && (

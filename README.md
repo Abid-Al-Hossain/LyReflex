@@ -1,16 +1,17 @@
 # 🎵 LyReflex — Visual Music Experience
 
-LyReflex is an experimental web application that transforms your music into a dynamic, cinematic visual experience. Simply upload an audio file, and the app automatically transcribes the audio, detects semantic lyric phrases using a Large Language Model, and fetches synchronized stock imagery that crossfades seamlessly to the beat of the track.
+LyReflex is an experimental web application that transforms your music into a dynamic, cinematic visual experience. Upload an audio file, and the app transcribes the lyrics with AI, detects meaningful lyric phrases, and syncs contextual **GIFs** or **photos** that crossfade in real-time with the beat.
 
 ## ✨ Features
 
-- **Automated AI Transcription:** Uses **Groq Whisper Large v3** to analyze audio in 1–2 seconds, providing precise, word-level timestamps.
-- **Semantic Phrase Detection:** Employs **Groq LLM (llama-3.1-8b-instant)** to intelligently group raw transcribed words into meaningful, human-readable lyric lines (no arbitrary cutting).
-- **Dynamic Visual Engine:** Extracts core thematic keywords per phrase and fetches context-aware, high-quality images from **Pixabay**, **Pexels**, and **Wikipedia's Free Image API**.
-- **Performance-Optimized Rolling Loader:** Instead of bulk-requesting images (which triggers API rate limits), LyReflex uses a time-driven rolling buffer. Images are pre-fetched sequentially based on the exact audio playback timestamp.
-- **Cinematic Crossfading:** Employs an A/B layering system to ensure zero-flicker, smooth image transitions during playback.
-- **Privacy-First Key Management:** Users can safely input their Groq API keys directly in the browser. Keys are stored locally via `localStorage` and never hit a database.
-- **Serverless Fallback:** Automatically falls back to the free **HuggingFace Inference API** for basic transcription if a Groq key isn't provided.
+- **Dual Visual Mode:** Choose between 🎞️ **GIF mode** (animated Giphy GIFs for vibes) or 🖼️ **Image mode** (cinematic Pixabay/Pexels photos) before upload.
+- **Automated AI Transcription:** Uses **Groq Whisper Large v3** to analyze audio in 1–2 seconds with word-level timestamps.
+- **Semantic Phrase Detection:** Employs **Groq LLM (llama-3.1-8b-instant)** to intelligently group raw words into meaningful lyric lines — not arbitrary chunks.
+- **Smart Visual Keywords:** Each phrase is tagged with a vivid, concrete search keyword by the same LLM call — "pull up in the wraith" → `Rolls Royce`, "made your whole year" → `achievement`.
+- **Time-Driven Rolling Loader:** Images/GIFs load based on actual audio playback timestamps. Works for both slow ballads and fast rap — no fixed timers, no API flooding.
+- **Cinematic Crossfading:** A/B layering system for zero-flicker, smooth visual transitions.
+- **Privacy-First:** API keys stored locally via `localStorage`. Nothing hits a database.
+- **Serverless Fallback:** Falls back to **HuggingFace Whisper** for transcription and **Wikipedia Images** for visuals if no API keys are set.
 
 ## 🚀 Getting Started
 
@@ -32,32 +33,47 @@ LyReflex is an experimental web application that transforms your music into a dy
    ```
 
 3. **Set up Environment Variables:**
-   Rename `.env.local.example` to `.env.local` and add your image API keys. You can also define your Groq key here to make it the default for the server.
+   Copy `.env.local.example` to `.env.local` and add your API keys:
    ```env
+   # GIF mode (default) — get free key at https://developers.giphy.com/dashboard/
+   NEXT_PUBLIC_GIPHY_API_KEY=your_giphy_key
+
+   # Image mode — get free keys at pixabay.com/api/docs & pexels.com/api
    NEXT_PUBLIC_PIXABAY_API_KEY=your_pixabay_key
    NEXT_PUBLIC_PEXELS_API_KEY=your_pexels_key
-   NEXT_PUBLIC_GROQ_API_KEY=your_optional_groq_key
+
+   # Transcription — get free key at https://console.groq.com
+   NEXT_PUBLIC_GROQ_API_KEY=your_groq_key
    ```
-   *Note: Users can also input their Groq key dynamically via the app interface. The Wikipedia Image fallback requires no API keys at all.*
+   > **Note:** Users can also input their Groq key dynamically via the app interface. Wikipedia Image fallback requires no keys at all.
 
 4. **Run the Development Server:**
    ```bash
    npm run dev
    ```
-   Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+   Open [http://localhost:3000](http://localhost:3000) with your browser.
 
 ## 🛠️ Architecture Overview
 
+```
+Audio File → Groq Whisper (transcribe) → Groq LLM (semantic phrases + keywords)
+                                           ↓
+                                     Time-driven rolling buffer
+                                           ↓
+                              GIF mode: Giphy → Pixabay → Wikipedia → Picsum
+                            Image mode: Pixabay → Pexels → Wikipedia → Picsum
+```
+
 - **Framework:** Next.js 16 (App Router)
 - **Styling:** Vanilla CSS (`globals.css`)
-- **Transcription Service:** Custom `transcription.ts` wrapper interfacing directly with `api.groq.com/openai/v1/audio/transcriptions`.
-- **Semantic Analysis:** `phraseService.ts` leverages `llama-3.1-8b-instant` to align exact word timestamps with meaningful semantic phrases in a single batch call.
-- **Audio Processing:** Browser-native Web Audio API for fast client-side audio decoding.
-- **Visual Engine:** React `useRef` based rolling buffer syncing engine, ensuring robust event firing and precise image loading against the HTML `<audio>` `timeupdate` timeline.
+- **Transcription:** `transcription.ts` — Groq Whisper Large v3 / HuggingFace fallback
+- **Phrase Detection:** `phraseService.ts` — One Groq LLM call for all phrases + keywords
+- **Visual Engine:** `imageService.ts` — Dual-mode (GIF/Image) with cascading fallbacks
+- **Sync Engine:** React `useRef` rolling buffer driven by `<audio>` `timeupdate`
 
 ## 🤝 Contributing
 
-Contributions, issues, and feature requests are welcome. Feel free to check the issues page if you want to contribute.
+Contributions, issues, and feature requests are welcome. Feel free to check the issues page.
 
 ## 📝 License
 

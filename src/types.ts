@@ -7,3 +7,6 @@ export interface LyricMoment {
 }
 
 export type AppState = "upload" | "processing" | "playing";
+
+/** User-selectable visual mode */
+export type VisualMode = "gif" | "image";
