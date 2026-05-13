@@ -12,12 +12,12 @@ import { getSemanticPhrases } from "@/lib/phraseService";
 import { transcribeAudio, TranscriptWord } from "@/lib/transcription";
 
 /* ─── Constants ───────────────────────────────────────────────────────────── */
-/**
- * How many seconds ahead of a phrase's startTime we begin loading its visual.
- * 15s gives enough time to fetch even slow Wikipedia images.
- * Fully time-driven — works for both slow ballads and fast rap.
- */
 const LOOKAHEAD_SECS = 15;
+/**
+ * Minimum time-jump (seconds) that counts as a user seek vs normal playback.
+ * audio.timeupdate fires every ~250ms, so normal drift is max ~0.3s.
+ */
+const SEEK_THRESHOLD = 1.5;
 
 /* ── Helpers ─────────────────────────────────────────────────────────────── */
 function getAudioDuration(file: File): Promise<number> {
@@ -27,6 +27,20 @@ function getAudioDuration(file: File): Promise<number> {
     audio.src   = url;
     audio.onloadedmetadata = () => { URL.revokeObjectURL(url); resolve(audio.duration); };
     audio.onerror          = ()  => { URL.revokeObjectURL(url); resolve(240); };
+  });
+}
+
+/**
+ * Preload a media URL (image or GIF) into the browser's decode cache.
+ * Returns as soon as the first frame is ready — no flash on display.
+ * Times out after 4s so we never block indefinitely on a slow GIF.
+ */
+function preloadMedia(url: string): Promise<void> {
+  return new Promise((resolve) => {
+    const img = new window.Image();
+    const timer = setTimeout(resolve, 4000); // max wait
+    img.onload = img.onerror = () => { clearTimeout(timer); resolve(); };
+    img.src = url;
   });
 }
 
@@ -41,32 +55,57 @@ export default function Home() {
   const [statusMsg,    setStatusMsg]    = useState("Starting…");
   const [showKeyModal, setShowKeyModal] = useState(false);
 
-  /* Visual mode — persisted in state, user toggles before upload */
+  /* Visual mode */
   const [visualMode, setVisualMode] = useState<VisualMode>("gif");
   const visualModeRef = useRef<VisualMode>("gif");
 
-  /* All API keys from localStorage */
+  /* API keys */
   const { keys: apiKeys, reload: reloadKeys } = useApiKeys();
 
   /* A/B crossfade layers */
   const [layerA,      setLayerA]      = useState<string | null>(null);
   const [layerB,      setLayerB]      = useState<string | null>(null);
   const [activeLayer, setActiveLayer] = useState<"a" | "b">("a");
-  const activeLayerRef = useRef<"a" | "b">("a");
-  const lastLyricRef   = useRef<LyricMoment | null>(null);
-  const lyricsRef      = useRef<LyricMoment[]>([]);
+  const activeLayerRef          = useRef<"a" | "b">("a");
+  const lastLyricRef            = useRef<LyricMoment | null>(null);
+  const lyricsRef               = useRef<LyricMoment[]>([]);
 
-  /* Rolling loader state */
-  const isLoadingRef = useRef<boolean>(false);
-  const loadedSetRef = useRef<Set<number>>(new Set());
+  /* Rolling loader */
+  const isLoadingRef            = useRef<boolean>(false);
+  const loadedSetRef            = useRef<Set<number>>(new Set());
 
-  /* ── Mode toggle handler ─────────────────────────────────────────────────── */
+  /* FIX 1: Track the index of the CURRENTLY PLAYING phrase.
+     Used by loadVisualForIndex to crossfade immediately when the active
+     phrase's image arrives (e.g. after a seek to an unloaded section). */
+  const currentPhraseIdxRef     = useRef<number>(-1);
+
+  /* FIX 2: Detect seeks. Track the last reported audio time. */
+  const lastTimeRef             = useRef<number>(-1);
+
+  /* FIX 3: Remove [layerA] dep from loadVisualForIndex.
+     Use a plain ref flag instead so the callback is stable. */
+  const hasInitialImageRef      = useRef<boolean>(false);
+
+  /* ── Crossfade helper (pure side-effect, no state deps) ─────────────────── */
+  const crossfadeTo = useCallback((url: string) => {
+    if (activeLayerRef.current === "a") {
+      setLayerB(url);
+      setActiveLayer("b");
+      activeLayerRef.current = "b";
+    } else {
+      setLayerA(url);
+      setActiveLayer("a");
+      activeLayerRef.current = "a";
+    }
+  }, []);
+
+  /* ── Mode toggle ─────────────────────────────────────────────────────────── */
   const handleModeChange = useCallback((mode: VisualMode) => {
     setVisualMode(mode);
     visualModeRef.current = mode;
   }, []);
 
-  /* ── Visual loader helper ────────────────────────────────────────────────── */
+  /* ── Visual loader ───────────────────────────────────────────────────────── */
   const loadVisualForIndex = useCallback(async (index: number): Promise<void> => {
     const phrases = lyricsRef.current;
     if (index >= phrases.length) return;
@@ -77,21 +116,35 @@ export default function Home() {
     const keyword = phrases[index].keyword;
     const mode    = visualModeRef.current;
     const url     = await fetchVisual(keyword, mode).catch(() => "");
+    if (!url) return;
 
-    if (url) {
-      const updated = [...lyricsRef.current];
-      updated[index] = { ...updated[index], imageUrl: url };
-      lyricsRef.current = updated;
-      setLyrics([...updated]);
+    /* FIX 4: Preload into browser decode cache BEFORE touching any state.
+       This ensures the <img> element renders instantly without a flash. */
+    await preloadMedia(url);
 
-      // Set initial background from the very first visual
-      if (!layerA) {
-        setLayerA(url);
-        activeLayerRef.current = "a";
-        setActiveLayer("a");
-      }
+    /* Store in lyricsRef */
+    const updated = [...lyricsRef.current];
+    updated[index] = { ...updated[index], imageUrl: url };
+    lyricsRef.current = updated;
+    setLyrics([...updated]);
+
+    /* Set first-ever background */
+    if (!hasInitialImageRef.current) {
+      hasInitialImageRef.current = true;
+      setLayerA(url);
+      activeLayerRef.current = "a";
+      setActiveLayer("a");
+      return;
     }
-  }, [layerA]);
+
+    /* FIX 1: If THIS phrase is currently active (e.g. we just seeked here
+       and the image wasn't loaded yet), crossfade to it immediately.
+       Without this, the player keeps showing the stale image until the
+       next phrase boundary is crossed. */
+    if (index === currentPhraseIdxRef.current) {
+      crossfadeTo(url);
+    }
+  }, [crossfadeTo]);
 
   /* ── File selected ──────────────────────────────────────────────────────── */
   const handleFileSelect = useCallback(async (file: File) => {
@@ -100,10 +153,16 @@ export default function Home() {
     setAppState("processing");
     setStatusMsg("Reading audio…");
     clearMediaCache();
-    lastLyricRef.current   = null;
-    activeLayerRef.current = "a";
-    isLoadingRef.current   = false;
-    loadedSetRef.current   = new Set();
+
+    /* Full reset of all refs */
+    lastLyricRef.current         = null;
+    activeLayerRef.current       = "a";
+    isLoadingRef.current         = false;
+    loadedSetRef.current         = new Set();
+    currentPhraseIdxRef.current  = -1;
+    lastTimeRef.current          = -1;
+    hasInitialImageRef.current   = false;
+
     setActiveLayer("a");
     setLayerA(null);
     setLayerB(null);
@@ -117,22 +176,19 @@ export default function Home() {
         ? localStorage.getItem("lyreflex_groq_key") ?? undefined
         : undefined;
 
-      /* ── Step 1: Transcribe ──────────────────────────────────────────────── */
+      setStatusMsg("Transcribing audio…");
       const words: TranscriptWord[] = await transcribeAudio(file, duration, setStatusMsg, lsKey);
 
-      /* ── Step 2: Semantic phrase detection (ONE Groq LLM call) ─────────── */
       setStatusMsg("Analysing lyrics…");
       const phrases = await getSemanticPhrases(words, lsKey ?? null, duration);
 
       lyricsRef.current = phrases;
       setLyrics([...phrases]);
 
-      /* ── Step 3: Pre-load first visual ───────────────────────────────────── */
       const modeLabel = visualModeRef.current === "gif" ? "GIF" : "image";
       setStatusMsg(`Loading first ${modeLabel}…`);
       await loadVisualForIndex(0);
 
-      /* ── Step 4: Show player — time-driven loader takes over ─────────────── */
       setAppState("playing");
       setStatusMsg("");
 
@@ -142,34 +198,45 @@ export default function Home() {
     }
   }, [loadVisualForIndex]);
 
-  /* ── Sync engine — runs on every audio tick (~4× per second) ──────────── */
+  /* ── Sync engine ─────────────────────────────────────────────────────────── */
   const handleTimeUpdate = useCallback((time: number) => {
     const phrases = lyricsRef.current;
+    const prev    = lastTimeRef.current;
+    lastTimeRef.current = time;
 
-    /* ── 1. Lyric sync + crossfade ─────────────────────────────────────── */
-    const lyric = phrases.find((l) => time >= l.startTime && time <= l.endTime) ?? null;
+    /* FIX 2: Seek detection.
+       If the audio jumped more than SEEK_THRESHOLD seconds,
+       the user clicked/dragged the progress bar.
+       → Reset isLoadingRef so we don't stay blocked on an in-flight
+         load that's now irrelevant.
+       → Null lastLyricRef to force re-evaluation at the new position. */
+    if (prev >= 0 && Math.abs(time - prev) > SEEK_THRESHOLD) {
+      isLoadingRef.current  = false;
+      lastLyricRef.current  = null;
+    }
+
+    /* ── 1. Find current phrase ───────────────────────────────────────────── */
+    const lyricIdx = phrases.findIndex((l) => time >= l.startTime && time <= l.endTime);
+    const lyric    = lyricIdx >= 0 ? phrases[lyricIdx] : null;
+
+    /* Always keep the current phrase index ref up to date */
+    currentPhraseIdxRef.current = lyricIdx;
 
     if (lyric && lyric !== lastLyricRef.current) {
       lastLyricRef.current = lyric;
       setCurrentLyric(lyric);
 
+      /* Crossfade only if the image is already loaded.
+         If not, loadVisualForIndex will crossfade when it finishes (FIX 1). */
       if (lyric.imageUrl) {
-        if (activeLayerRef.current === "a") {
-          setLayerB(lyric.imageUrl);
-          setActiveLayer("b");
-          activeLayerRef.current = "b";
-        } else {
-          setLayerA(lyric.imageUrl);
-          setActiveLayer("a");
-          activeLayerRef.current = "a";
-        }
+        crossfadeTo(lyric.imageUrl);
       }
     } else if (!lyric && lastLyricRef.current) {
       lastLyricRef.current = null;
       setCurrentLyric(null);
     }
 
-    /* ── 2. Rolling loader — driven by audio timestamp ─────────────────── */
+    /* ── 2. Rolling loader ────────────────────────────────────────────────── */
     if (!isLoadingRef.current) {
       const target = phrases.find(
         (p, i) =>
@@ -186,7 +253,7 @@ export default function Home() {
         });
       }
     }
-  }, [loadVisualForIndex]);
+  }, [loadVisualForIndex, crossfadeTo]);
 
   /* ── Reset ──────────────────────────────────────────────────────────────── */
   const handleReset = useCallback(() => {
@@ -198,11 +265,14 @@ export default function Home() {
     setLayerA(null);
     setLayerB(null);
     setActiveLayer("a");
-    activeLayerRef.current = "a";
-    lastLyricRef.current   = null;
-    lyricsRef.current      = [];
-    isLoadingRef.current   = false;
-    loadedSetRef.current   = new Set();
+    activeLayerRef.current       = "a";
+    lastLyricRef.current         = null;
+    lyricsRef.current            = [];
+    isLoadingRef.current         = false;
+    loadedSetRef.current         = new Set();
+    currentPhraseIdxRef.current  = -1;
+    lastTimeRef.current          = -1;
+    hasInitialImageRef.current   = false;
     clearMediaCache();
   }, []);
 
@@ -213,7 +283,6 @@ export default function Home() {
         <Navbar onKeyClick={() => setShowKeyModal(true)} groqKeySet={!!apiKeys.groq} />
         <Uploader onUpload={handleFileSelect} />
 
-        {/* Visual mode toggle */}
         <div className="mode-toggle-wrap">
           <span className="mode-toggle-label">Visual style</span>
           <div className="mode-toggle">
@@ -232,28 +301,18 @@ export default function Home() {
           </div>
         </div>
 
-        {/* API key status banner */}
         <div className="groq-banner">
           <button className="groq-btn-link" onClick={() => setShowKeyModal(true)}>
             🔑 Manage API Keys
           </button>
           <span>—</span>
-          <span className={apiKeys.groq ? "key-indicator key-indicator--on" : "key-indicator"}>
-            ⚡ Groq {apiKeys.groq ? "✓" : "✗"}
-          </span>
-          <span className={apiKeys.giphy ? "key-indicator key-indicator--on" : "key-indicator"}>
-            🎞️ Giphy {apiKeys.giphy ? "✓" : "✗"}
-          </span>
-          <span className={apiKeys.pixabay ? "key-indicator key-indicator--on" : "key-indicator"}>
-            🖼️ Pixabay {apiKeys.pixabay ? "✓" : "✗"}
-          </span>
+          <span className={apiKeys.groq    ? "key-indicator key-indicator--on" : "key-indicator"}>⚡ Groq {apiKeys.groq    ? "✓" : "✗"}</span>
+          <span className={apiKeys.giphy   ? "key-indicator key-indicator--on" : "key-indicator"}>🎞️ Giphy {apiKeys.giphy   ? "✓" : "✗"}</span>
+          <span className={apiKeys.pixabay ? "key-indicator key-indicator--on" : "key-indicator"}>🖼️ Pixabay {apiKeys.pixabay ? "✓" : "✗"}</span>
         </div>
 
         {showKeyModal && (
-          <ApiKeysModal
-            onClose={() => setShowKeyModal(false)}
-            onSave={reloadKeys}
-          />
+          <ApiKeysModal onClose={() => setShowKeyModal(false)} onSave={reloadKeys} />
         )}
       </div>
     );
@@ -305,10 +364,7 @@ export default function Home() {
         </div>
       )}
       {showKeyModal && (
-        <ApiKeysModal
-          onClose={() => setShowKeyModal(false)}
-          onSave={reloadKeys}
-        />
+        <ApiKeysModal onClose={() => setShowKeyModal(false)} onSave={reloadKeys} />
       )}
     </div>
   );
