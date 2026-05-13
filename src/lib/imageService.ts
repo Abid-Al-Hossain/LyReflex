@@ -1,30 +1,23 @@
 /**
  * LyReflex — Visual Media Service
  *
- * Two modes controlled by user preference:
+ * All API keys are read from localStorage (user-provided via the UI).
+ * No server-side env vars needed — each user brings their own keys.
  *
- * GIF MODE  →  Giphy API  (world's largest GIF library, free beta key)
- *              Endpoint: https://api.giphy.com/v1/gifs/search
- *              Rate: 100 req/hr (beta), plenty for time-driven rolling buffer
- *              Returns animated GIFs that feel alive with the music
- *
- * IMAGE MODE → Pixabay API (high-quality stock photos, free key)
- *              Endpoint: https://pixabay.com/api/
- *              Rate: 5,000 req/hr (generous)
- *              Returns cinematic-quality still photos
+ * GIF MODE  →  Giphy (user key from localStorage)
+ * IMAGE MODE → Pixabay (user key from localStorage)
  *
  * Fallback cascade (both modes):
- *   1. Primary API (Giphy/Pixabay depending on mode)
- *   2. Pexels (good photo fallback)
- *   3. Wikipedia (free, no key, always works)
- *   4. Picsum (seeded abstract placeholder, never fails)
+ *   Primary API → Wikipedia (free, no key) → Picsum (always works)
  */
 
 export type VisualMode = "gif" | "image";
 
-const PIXABAY_KEY = process.env.NEXT_PUBLIC_PIXABAY_API_KEY || "";
-const PEXELS_KEY  = process.env.NEXT_PUBLIC_PEXELS_API_KEY  || "";
-const GIPHY_KEY   = process.env.NEXT_PUBLIC_GIPHY_API_KEY   || "";
+/** Read a key from localStorage at call-time (always fresh) */
+function getKey(lsKey: string): string {
+  if (typeof window === "undefined") return "";
+  return localStorage.getItem(lsKey) ?? "";
+}
 
 /** In-memory cache — key includes mode so gif/image don't collide */
 const mediaCache = new Map<string, string>();
@@ -34,18 +27,15 @@ const mediaCache = new Map<string, string>();
 /* ══════════════════════════════════════════════════════════════════════════ */
 
 /* ── Giphy ────────────────────────────────────────────────────────────────── */
-/**
- * World's largest GIF search. Free beta key: 100 req/hr.
- * Returns the `fixed_width` rendition — optimized for web, ~200-500KB per GIF.
- * Using `rating=pg` to keep it safe.
- */
 async function fetchGiphy(query: string): Promise<string | null> {
-  if (!GIPHY_KEY) return null;
+  const key = getKey("lyreflex_giphy_key");
+  if (!key) return null;
+
   const cacheKey = `giphy:${query}`;
   if (mediaCache.has(cacheKey)) return mediaCache.get(cacheKey)!;
 
   try {
-    const url = `https://api.giphy.com/v1/gifs/search?api_key=${GIPHY_KEY}&q=${encodeURIComponent(query)}&limit=8&rating=pg&lang=en`;
+    const url = `https://api.giphy.com/v1/gifs/search?api_key=${key}&q=${encodeURIComponent(query)}&limit=8&rating=pg&lang=en`;
     const res = await fetch(url, { signal: AbortSignal.timeout(6_000) });
     if (!res.ok) return null;
 
@@ -53,9 +43,7 @@ async function fetchGiphy(query: string): Promise<string | null> {
     const gifs = json.data ?? [];
     if (gifs.length === 0) return null;
 
-    // Pick from the top 5 for variety
     const pick = gifs[Math.floor(Math.random() * Math.min(gifs.length, 5))];
-    // Use fixed_width for consistent rendering (not too big, not too small)
     const gifUrl = (pick.images?.fixed_width?.url ?? pick.images?.original?.url ?? "") as string;
 
     if (gifUrl) {
@@ -72,38 +60,20 @@ async function fetchGiphy(query: string): Promise<string | null> {
 
 /* ── Pixabay ──────────────────────────────────────────────────────────────── */
 async function fetchPixabay(query: string): Promise<string | null> {
-  if (!PIXABAY_KEY) return null;
+  const key = getKey("lyreflex_pixabay_key");
+  if (!key) return null;
+
   const cacheKey = `pixabay:${query}`;
   if (mediaCache.has(cacheKey)) return mediaCache.get(cacheKey)!;
 
   try {
-    const res  = await fetch(
-      `https://pixabay.com/api/?key=${PIXABAY_KEY}&q=${encodeURIComponent(query)}&image_type=photo&orientation=horizontal&safesearch=true&per_page=8&order=popular`
+    const res = await fetch(
+      `https://pixabay.com/api/?key=${key}&q=${encodeURIComponent(query)}&image_type=photo&orientation=horizontal&safesearch=true&per_page=8&order=popular`
     );
     const data = await res.json();
     if (data.hits?.length > 0) {
       const pick = data.hits[Math.floor(Math.random() * Math.min(data.hits.length, 5))];
       const url  = (pick.largeImageURL ?? pick.webformatURL) as string;
-      if (url) { mediaCache.set(cacheKey, url); return url; }
-    }
-  } catch { /* swallow */ }
-  return null;
-}
-
-/* ── Pexels ───────────────────────────────────────────────────────────────── */
-async function fetchPexels(query: string): Promise<string | null> {
-  if (!PEXELS_KEY) return null;
-  const cacheKey = `pexels:${query}`;
-  if (mediaCache.has(cacheKey)) return mediaCache.get(cacheKey)!;
-
-  try {
-    const res  = await fetch(
-      `https://api.pexels.com/v1/search?query=${encodeURIComponent(query)}&per_page=5`,
-      { headers: { Authorization: PEXELS_KEY } }
-    );
-    const data = await res.json();
-    if (data.photos?.length > 0) {
-      const url = data.photos[Math.floor(Math.random() * data.photos.length)].src.large2x as string;
       if (url) { mediaCache.set(cacheKey, url); return url; }
     }
   } catch { /* swallow */ }
@@ -155,26 +125,19 @@ function getPicsumFallback(keyword: string): string {
 /* ══════════════════════════════════════════════════════════════════════════ */
 
 /**
- * Fetch a visual (GIF or Image) for the given keyword, using the specified mode.
+ * Fetch a visual (GIF or Image) for the given keyword.
  *
- * GIF mode cascade:   Giphy → Pixabay → Wikipedia → Picsum
- * Image mode cascade: Pixabay → Pexels → Wikipedia → Picsum
+ * GIF mode:   Giphy → Pixabay → Wikipedia → Picsum
+ * Image mode: Pixabay → Wikipedia → Picsum
  */
 export async function fetchVisual(keyword: string, mode: VisualMode): Promise<string> {
   if (mode === "gif") {
-    // 1. Giphy (animated GIFs — the primary source for GIF mode)
     const giphy = await fetchGiphy(keyword);
     if (giphy) return giphy;
-
-    // 2. Fall through to image providers if no GIF found
   }
 
-  // Image cascade (used by both modes as fallback)
   const pixabay = await fetchPixabay(keyword);
   if (pixabay) return pixabay;
-
-  const pexels = await fetchPexels(keyword);
-  if (pexels) return pexels;
 
   const wiki = await fetchWikipedia(keyword);
   if (wiki) return wiki;
@@ -185,13 +148,4 @@ export async function fetchVisual(keyword: string, mode: VisualMode): Promise<st
 /** Clear in-memory cache between songs */
 export function clearMediaCache(): void {
   mediaCache.clear();
-}
-
-/** Check which APIs are configured */
-export function getConfiguredAPIs(): { giphy: boolean; pixabay: boolean; pexels: boolean } {
-  return {
-    giphy:   !!GIPHY_KEY,
-    pixabay: !!PIXABAY_KEY,
-    pexels:  !!PEXELS_KEY,
-  };
 }

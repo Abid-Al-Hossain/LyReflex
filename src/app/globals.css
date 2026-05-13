@@ -305,6 +305,34 @@ code { font-family:'Space Mono',monospace; }
 .mode-btn--active:hover { color:#fff; }
 .mode-icon { font-size:0.85rem; }
 
+/* ─── Key indicators (upload screen) ─────────────────── */
+.key-indicator {
+  font-size:0.78rem; color:var(--text-3); font-weight:500;
+  display:inline-flex; align-items:center; gap:0.25rem;
+}
+.key-indicator--on { color:rgba(16,185,129,0.9); }
+
+/* ─── Key tabs (inside modal) ────────────────────────── */
+.key-tabs {
+  display:flex; gap:4px; margin-bottom:1.25rem;
+  background:rgba(255,255,255,0.03); padding:3px; border-radius:10px;
+  border:1px solid rgba(255,255,255,0.06);
+}
+.key-tab {
+  flex:1; display:flex; align-items:center; justify-content:center; gap:0.35rem;
+  background:none; border:none; color:var(--text-3); font-size:0.78rem; font-weight:500;
+  padding:0.5rem 0.6rem; border-radius:8px; cursor:pointer;
+  transition:all 0.2s var(--ease-expo); position:relative;
+}
+.key-tab:hover { color:var(--text-2); background:rgba(255,255,255,0.04); }
+.key-tab--active { background:var(--grad-brand); color:#fff; }
+.key-tab--active:hover { color:#fff; }
+.key-tab-dot {
+  width:6px; height:6px; border-radius:50%;
+  background:rgba(16,185,129,0.9); box-shadow:0 0 6px rgba(16,185,129,0.5);
+}
+.key-tab--active .key-tab-dot { background:#fff; box-shadow:none; }
+
 /* Modal */
 .modal-backdrop {
   position:fixed; top:0; left:0; right:0; bottom:0;

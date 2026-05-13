@@ -5,7 +5,7 @@ import Navbar        from "@/components/Navbar";
 import Uploader      from "@/components/Uploader";
 import Visualizer    from "@/components/Visualizer";
 import AudioPlayer   from "@/components/AudioPlayer";
-import GroqKeyModal, { useGroqKey } from "@/components/GroqKeyModal";
+import ApiKeysModal, { useApiKeys } from "@/components/GroqKeyModal";
 import { LyricMoment, AppState, VisualMode } from "@/types";
 import { fetchVisual, clearMediaCache } from "@/lib/imageService";
 import { getSemanticPhrases } from "@/lib/phraseService";
@@ -45,8 +45,8 @@ export default function Home() {
   const [visualMode, setVisualMode] = useState<VisualMode>("gif");
   const visualModeRef = useRef<VisualMode>("gif");
 
-  /* Groq key from localStorage */
-  const { key: groqKey, setKey: setGroqKey } = useGroqKey();
+  /* All API keys from localStorage */
+  const { keys: apiKeys, reload: reloadKeys } = useApiKeys();
 
   /* A/B crossfade layers */
   const [layerA,      setLayerA]      = useState<string | null>(null);
@@ -210,7 +210,7 @@ export default function Home() {
   if (appState === "upload") {
     return (
       <div className="page-wrapper">
-        <Navbar onKeyClick={() => setShowKeyModal(true)} groqKeySet={!!groqKey} />
+        <Navbar onKeyClick={() => setShowKeyModal(true)} groqKeySet={!!apiKeys.groq} />
         <Uploader onUpload={handleFileSelect} />
 
         {/* Visual mode toggle */}
@@ -232,31 +232,27 @@ export default function Home() {
           </div>
         </div>
 
-        {/* Groq callout banner */}
+        {/* API key status banner */}
         <div className="groq-banner">
-          {groqKey ? (
-            <>
-              <span className="groq-dot groq-dot--active" />
-              <span>⚡ Groq active — instant transcription</span>
-              <button className="groq-btn-link" onClick={() => setShowKeyModal(true)}>
-                Manage key
-              </button>
-            </>
-          ) : (
-            <>
-              <span className="groq-dot" />
-              <span>Add a free Groq key for instant results</span>
-              <button className="groq-btn-link" onClick={() => setShowKeyModal(true)}>
-                Set up →
-              </button>
-            </>
-          )}
+          <button className="groq-btn-link" onClick={() => setShowKeyModal(true)}>
+            🔑 Manage API Keys
+          </button>
+          <span>—</span>
+          <span className={apiKeys.groq ? "key-indicator key-indicator--on" : "key-indicator"}>
+            ⚡ Groq {apiKeys.groq ? "✓" : "✗"}
+          </span>
+          <span className={apiKeys.giphy ? "key-indicator key-indicator--on" : "key-indicator"}>
+            🎞️ Giphy {apiKeys.giphy ? "✓" : "✗"}
+          </span>
+          <span className={apiKeys.pixabay ? "key-indicator key-indicator--on" : "key-indicator"}>
+            🖼️ Pixabay {apiKeys.pixabay ? "✓" : "✗"}
+          </span>
         </div>
 
         {showKeyModal && (
-          <GroqKeyModal
+          <ApiKeysModal
             onClose={() => setShowKeyModal(false)}
-            onSave={(k) => setGroqKey(k)}
+            onSave={reloadKeys}
           />
         )}
       </div>
@@ -275,7 +271,7 @@ export default function Home() {
             <p className="proc-msg">{statusMsg}</p>
             <div className="proc-spinner" />
             <p className="proc-note">
-              {groqKey
+              {apiKeys.groq
                 ? "⚡ Groq Whisper Large v3 — completes in ~2 seconds."
                 : "Using HuggingFace Whisper (free, ~15–30 s). Add a Groq key for instant results."}
             </p>
@@ -296,7 +292,7 @@ export default function Home() {
         isProcessing={false}
       />
       <div className="player-navbar">
-        <Navbar onKeyClick={() => setShowKeyModal(true)} groqKeySet={!!groqKey} />
+        <Navbar onKeyClick={() => setShowKeyModal(true)} groqKeySet={!!apiKeys.groq} />
       </div>
       {audioSrc && (
         <div className="player-dock">
@@ -309,9 +305,9 @@ export default function Home() {
         </div>
       )}
       {showKeyModal && (
-        <GroqKeyModal
+        <ApiKeysModal
           onClose={() => setShowKeyModal(false)}
-          onSave={(k) => setGroqKey(k)}
+          onSave={reloadKeys}
         />
       )}
     </div>
