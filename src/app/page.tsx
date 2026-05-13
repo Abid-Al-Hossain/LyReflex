@@ -7,9 +7,17 @@ import Visualizer    from "@/components/Visualizer";
 import AudioPlayer   from "@/components/AudioPlayer";
 import GroqKeyModal, { useGroqKey } from "@/components/GroqKeyModal";
 import { LyricMoment, AppState } from "@/types";
-import { fetchImage, preCacheImage, clearImageCache } from "@/lib/imageService";
-import { groupChunksIntoPhrases, WhisperChunk } from "@/lib/lyrics";
+import { fetchImage, clearImageCache } from "@/lib/imageService";
+import { getSemanticPhrases } from "@/lib/phraseService";
 import { transcribeAudio, TranscriptWord } from "@/lib/transcription";
+
+/* ─── Constants ───────────────────────────────────────────────────────────── */
+/**
+ * How many seconds ahead of a phrase's startTime we begin loading its image.
+ * 15s gives enough time to fetch even slow Wikipedia images.
+ * Fully time-driven — works for both slow ballads and fast rap.
+ */
+const LOOKAHEAD_SECS = 15;
 
 /* ── Helpers ─────────────────────────────────────────────────────────────── */
 function getAudioDuration(file: File): Promise<number> {
@@ -22,12 +30,7 @@ function getAudioDuration(file: File): Promise<number> {
   });
 }
 
-function toChunks(words: TranscriptWord[]): WhisperChunk[] {
-  return words.map((w) => ({
-    text:      ` ${w.word}`,
-    timestamp: [w.start, w.end] as [number, number | null],
-  }));
-}
+/* ─────────────────────────────────────────────────────────────────────────── */
 
 export default function Home() {
   const [appState,     setAppState]     = useState<AppState>("upload");
@@ -41,7 +44,7 @@ export default function Home() {
   /* Groq key from localStorage */
   const { key: groqKey, setKey: setGroqKey } = useGroqKey();
 
-  /* A/B crossfade */
+  /* A/B crossfade layers */
   const [layerA,      setLayerA]      = useState<string | null>(null);
   const [layerB,      setLayerB]      = useState<string | null>(null);
   const [activeLayer, setActiveLayer] = useState<"a" | "b">("a");
@@ -49,8 +52,40 @@ export default function Home() {
   const lastLyricRef   = useRef<LyricMoment | null>(null);
   const lyricsRef      = useRef<LyricMoment[]>([]);
 
+  /* Rolling image loader — tracks which phrase is currently being fetched */
+  const isLoadingRef   = useRef<boolean>(false);
+  /** Set of phrase indices currently in-flight or already loaded */
+  const loadedSetRef   = useRef<Set<number>>(new Set());
+
+  /* ── Image loader helper ─────────────────────────────────────────────────── */
+  const loadImageForIndex = useCallback(async (index: number): Promise<void> => {
+    const phrases = lyricsRef.current;
+    if (index >= phrases.length) return;
+    if (loadedSetRef.current.has(index)) return; // already loaded or in-flight
+
+    loadedSetRef.current.add(index); // mark in-flight immediately
+
+    const keyword = phrases[index].keyword;
+    const url     = await fetchImage(keyword).catch(() => "");
+
+    if (url) {
+      const updated = [...lyricsRef.current];
+      updated[index] = { ...updated[index], imageUrl: url };
+      lyricsRef.current = updated;
+      setLyrics([...updated]);
+
+      // Set the initial background layer from the very first image that arrives
+      if (!layerA) {
+        setLayerA(url);
+        activeLayerRef.current = "a";
+        setActiveLayer("a");
+      }
+    }
+  }, [layerA]);
+
   /* ── File selected ──────────────────────────────────────────────────────── */
   const handleFileSelect = useCallback(async (file: File) => {
+    // Reset everything
     setAudioFile(file);
     setAudioSrc(URL.createObjectURL(file));
     setAppState("processing");
@@ -58,87 +93,63 @@ export default function Home() {
     clearImageCache();
     lastLyricRef.current   = null;
     activeLayerRef.current = "a";
+    isLoadingRef.current   = false;
+    loadedSetRef.current   = new Set();
     setActiveLayer("a");
     setLayerA(null);
     setLayerB(null);
+    setLyrics([]);
     lyricsRef.current = [];
 
     try {
       const duration = await getAudioDuration(file);
 
-      /* Read key from localStorage at call time (most up-to-date) */
+      /* Read key from localStorage (most up-to-date at call time) */
       const lsKey = typeof window !== "undefined"
         ? localStorage.getItem("lyreflex_groq_key") ?? undefined
         : undefined;
 
-      const words = await transcribeAudio(file, duration, setStatusMsg, lsKey);
+      /* ── Step 1: Transcribe ──────────────────────────────────────────────── */
+      const words: TranscriptWord[] = await transcribeAudio(file, duration, setStatusMsg, lsKey);
 
-      setStatusMsg("Building visual timeline…");
-      const chunks  = toChunks(words);
-      let phrases   = groupChunksIntoPhrases(chunks, 5);
+      /* ── Step 2: Semantic phrase detection (ONE Groq LLM call) ─────────── */
+      setStatusMsg("Analysing lyrics…");
+      const phrases = await getSemanticPhrases(words, lsKey ?? null, duration);
 
-      /* Scale timestamps to full song if needed */
-      const lastPhrase = phrases[phrases.length - 1];
-      if (lastPhrase && lastPhrase.endTime < duration * 0.9) {
-        const scale = duration / lastPhrase.endTime;
-        phrases = phrases.map((p) => ({
-          ...p,
-          startTime: p.startTime * scale,
-          endTime:   p.endTime   * scale,
-        }));
-      }
+      // Store all phrases immediately (images empty for now)
+      lyricsRef.current = phrases;
+      setLyrics([...phrases]);
 
-      setStatusMsg(`Generating AI visuals for ${phrases.length} moments…`);
-      
-      // 1. Resolve URLs synchronously (since Pollinations URL generation is instant)
-      const enriched = await Promise.all(
-        phrases.map(async (p) => {
-          const url = await fetchImage(p.keyword).catch(() => "");
-          return { ...p, imageUrl: url };
-        })
-      );
+      /* ── Step 3: Pre-load image 0 only, so there's something visible immediately ── */
+      setStatusMsg("Loading first visual…");
+      await loadImageForIndex(0);
 
-      // 2. Pre-cache ONLY the first image and await it
-      const firstValid = enriched.find((e) => e.imageUrl);
-      if (firstValid?.imageUrl) {
-        await preCacheImage(firstValid.imageUrl);
-      }
-
-      // 3. Sequentially pre-cache the rest in the background to avoid 500 errors
-      // (Firing 60 simultaneous generation requests crashes the free AI server)
-      const otherUrls = enriched.map(e => e.imageUrl).filter(u => u && u !== firstValid?.imageUrl) as string[];
-      (async () => {
-        for (const u of otherUrls) {
-          // Await each download before starting the next
-          await preCacheImage(u);
-        }
-      })();
-
-      lyricsRef.current = enriched;
-      setLyrics(enriched);
-
-      const first = enriched.find((e) => e.imageUrl);
-      if (first?.imageUrl) {
-        setLayerA(first.imageUrl);
-        activeLayerRef.current = "a";
-        setActiveLayer("a");
-      }
-
+      /* ── Step 4: Show the player — time-driven loader takes over ────────── */
+      // From here, handleTimeUpdate fires every ~250ms and loads images
+      // for any phrase whose startTime is within LOOKAHEAD_SECS of the
+      // current playback position. This is correct for both slow ballads
+      // and fast rap — images are fetched at exactly the right moment,
+      // not on an arbitrary fixed timer.
       setAppState("playing");
+      setStatusMsg("");
+
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       setStatusMsg(`Error: ${msg}`);
     }
-  }, []);
+  }, [loadImageForIndex]);
 
-  /* ── Sync engine ─────────────────────────────────────────────────────────── */
+  /* ── Sync engine — runs on every audio tick (~4× per second) ──────────── */
   const handleTimeUpdate = useCallback((time: number) => {
-    const lyric =
-      lyricsRef.current.find((l) => time >= l.startTime && time <= l.endTime) ?? null;
+    const phrases = lyricsRef.current;
+
+    /* ── 1. Update currently visible lyric & crossfade image ─────────────── */
+    const lyric = phrases.find((l) => time >= l.startTime && time <= l.endTime) ?? null;
 
     if (lyric && lyric !== lastLyricRef.current) {
       lastLyricRef.current = lyric;
       setCurrentLyric(lyric);
+
       if (lyric.imageUrl) {
         if (activeLayerRef.current === "a") {
           setLayerB(lyric.imageUrl);
@@ -154,7 +165,31 @@ export default function Home() {
       lastLyricRef.current = null;
       setCurrentLyric(null);
     }
-  }, []);
+
+    /* ── 2. Rolling loader: load the NEXT unloaded phrase within lookahead ── */
+    // Only one fetch at a time. We scan forward from the current time
+    // and trigger loading for the closest phrase that's:
+    //   • not yet loaded/in-flight
+    //   • starting within LOOKAHEAD_SECS from now
+    // For fast rap (0.5s phrases) and slow ballads alike, this ensures
+    // the image is fetching well before it's needed on screen.
+    if (!isLoadingRef.current) {
+      const target = phrases.find(
+        (p, i) =>
+          p.startTime > time &&                          // not yet playing
+          p.startTime - time <= LOOKAHEAD_SECS &&        // within lookahead window
+          !loadedSetRef.current.has(i)                   // not already loading/loaded
+      );
+
+      if (target) {
+        const idx = phrases.indexOf(target);
+        isLoadingRef.current = true;
+        loadImageForIndex(idx).then(() => {
+          isLoadingRef.current = false;
+        });
+      }
+    }
+  }, [loadImageForIndex]);
 
   /* ── Reset ──────────────────────────────────────────────────────────────── */
   const handleReset = useCallback(() => {
@@ -168,7 +203,9 @@ export default function Home() {
     setActiveLayer("a");
     activeLayerRef.current = "a";
     lastLyricRef.current   = null;
-    lyricsRef.current      = [];
+    lyricsRef.current    = [];
+    isLoadingRef.current = false;
+    loadedSetRef.current = new Set();
     clearImageCache();
   }, []);
 

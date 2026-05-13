@@ -1,118 +1,139 @@
 /**
  * LyReflex Image Service
  *
- * Strategy (best free APIs):
- * 1. PRIMARY  → Pixabay  — 5,000 req/hr free, no attribution required,
- *                           caching allowed, massive library (photos + vectors)
- * 2. FALLBACK → Pexels   — 200 req/hr / 20,000 req/month, developer-friendly CDN
- *
- * Why not Unsplash?
- *   - Only 50 req/hr on demo tier
- *   - Mandatory hotlinking (no caching)
- *   - Stricter attribution enforcement in API terms
- *
- * We use Pixabay first because it has the highest free rate limit (100x Unsplash)
- * and allows caching, which is critical for pre-loading images before the song starts.
+ * Priority:
+ * 1. Pixabay    — relevant photos, 5,000 req/hr (requires free API key)
+ * 2. Pexels     — relevant photos, 200 req/hr  (requires free API key)
+ * 3. Wikipedia  — FREE, no key, semantically relevant. Searches Wikipedia
+ *                 articles by keyword and returns the article's lead image.
+ *                 "starboy" → The Weeknd photo, "Rolls Royce" → car photo,
+ *                 "prayer" → prayer image, "money" → cash photo, etc.
+ * 4. Picsum     — seeded abstract fallback (always works)
  */
 
 const PIXABAY_KEY = process.env.NEXT_PUBLIC_PIXABAY_API_KEY || "";
 const PEXELS_KEY  = process.env.NEXT_PUBLIC_PEXELS_API_KEY  || "";
 
-/** In-memory cache to avoid duplicate API calls for the same keyword */
+/** In-memory cache so we never fetch the same keyword twice per session */
 const imageCache = new Map<string, string>();
 
+/* ── Pixabay ──────────────────────────────────────────────────────────────── */
 async function fetchPixabay(query: string): Promise<string | null> {
   if (!PIXABAY_KEY) return null;
-
   const cacheKey = `pixabay:${query}`;
   if (imageCache.has(cacheKey)) return imageCache.get(cacheKey)!;
-
   try {
-    const url = `https://pixabay.com/api/?key=${PIXABAY_KEY}&q=${encodeURIComponent(query)}&image_type=photo&orientation=horizontal&safesearch=true&per_page=5&order=popular`;
-    const res  = await fetch(url);
+    const res  = await fetch(
+      `https://pixabay.com/api/?key=${PIXABAY_KEY}&q=${encodeURIComponent(query)}&image_type=photo&orientation=horizontal&safesearch=true&per_page=5&order=popular`
+    );
     const data = await res.json();
-
-    if (data.hits && data.hits.length > 0) {
-      // Pick a random result from top-5 for visual variety on repeat keywords
-      const pick = data.hits[Math.floor(Math.random() * data.hits.length)];
-      const imageUrl = pick.largeImageURL as string;
-      imageCache.set(cacheKey, imageUrl);
-      return imageUrl;
+    if (data.hits?.length > 0) {
+      const url = data.hits[Math.floor(Math.random() * data.hits.length)].largeImageURL as string;
+      imageCache.set(cacheKey, url);
+      return url;
     }
-    return null;
-  } catch (err) {
-    console.error("[LyReflex] Pixabay error:", err);
-    return null;
-  }
+  } catch { /* swallow */ }
+  return null;
 }
 
+/* ── Pexels ───────────────────────────────────────────────────────────────── */
 async function fetchPexels(query: string): Promise<string | null> {
   if (!PEXELS_KEY) return null;
-
   const cacheKey = `pexels:${query}`;
+  if (imageCache.has(cacheKey)) return imageCache.get(cacheKey)!;
+  try {
+    const res  = await fetch(
+      `https://api.pexels.com/v1/search?query=${encodeURIComponent(query)}&per_page=5`,
+      { headers: { Authorization: PEXELS_KEY } }
+    );
+    const data = await res.json();
+    if (data.photos?.length > 0) {
+      const url = data.photos[Math.floor(Math.random() * data.photos.length)].src.large2x as string;
+      imageCache.set(cacheKey, url);
+      return url;
+    }
+  } catch { /* swallow */ }
+  return null;
+}
+
+/* ── Wikipedia Image API ──────────────────────────────────────────────────── */
+/**
+ * Uses the free Wikipedia/MediaWiki API to find the lead image of the article
+ * most relevant to the keyword. This gives us high-quality, contextually 
+ * accurate photos without any API key or rate limits.
+ *
+ * Examples:
+ *   "Rolls Royce"       → Rolls-Royce Phantom photo
+ *   "diamond jewelry"   → Diamond necklace photo
+ *   "nightclub"         → Nightclub interior photo
+ *   "achievement"       → Trophy/podium photo
+ *   "prayer"            → Hands in prayer photo
+ *   "money"             → Cash/currency photo
+ *   "basketball"        → Basketball on court photo
+ */
+async function fetchWikipedia(query: string): Promise<string | null> {
+  const cacheKey = `wiki:${query}`;
   if (imageCache.has(cacheKey)) return imageCache.get(cacheKey)!;
 
   try {
-    const res  = await fetch(`https://api.pexels.com/v1/search?query=${encodeURIComponent(query)}&per_page=5`, {
-      headers: { Authorization: PEXELS_KEY },
-    });
-    const data = await res.json();
+    // Step 1: Search Wikipedia for the best matching article title
+    const searchUrl = `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(query)}&srlimit=3&format=json&origin=*`;
+    const searchRes = await fetch(searchUrl, { signal: AbortSignal.timeout(6_000) });
+    if (!searchRes.ok) return null;
 
-    if (data.photos && data.photos.length > 0) {
-      const pick = data.photos[Math.floor(Math.random() * data.photos.length)];
-      const imageUrl = pick.src.large2x as string;
-      imageCache.set(cacheKey, imageUrl);
-      return imageUrl;
+    const searchData = await searchRes.json();
+    const hits = searchData.query?.search ?? [];
+    if (hits.length === 0) return null;
+
+    // Step 2: Try the top search results until we find one with a lead image
+    for (const hit of hits.slice(0, 3)) {
+      const title      = hit.title as string;
+      const imageUrl   = `https://en.wikipedia.org/w/api.php?action=query&prop=pageimages&titles=${encodeURIComponent(title)}&format=json&pithumbsize=1280&origin=*`;
+      const imageRes   = await fetch(imageUrl, { signal: AbortSignal.timeout(6_000) });
+      if (!imageRes.ok) continue;
+
+      const imageData  = await imageRes.json();
+      const pages      = imageData.query?.pages ?? {};
+      const page       = Object.values(pages)[0] as { thumbnail?: { source: string } };
+      const src        = page?.thumbnail?.source;
+
+      if (src) {
+        // Upgrade the thumbnail to max resolution by removing the width suffix
+        // e.g. "...320px-foo.jpg" → "...1280px-foo.jpg"
+        const hq = src.replace(/\/\d+px-/, "/1280px-");
+        imageCache.set(cacheKey, hq);
+        return hq;
+      }
     }
-    return null;
-  } catch (err) {
-    console.error("[LyReflex] Pexels error:", err);
-    return null;
-  }
+  } catch { /* swallow */ }
+
+  return null;
 }
 
-/**
- * Generates a prompt-based AI image using Pollinations.ai.
- * This guarantees a highly relevant, cinematic image based on the lyric phrase.
- */
-function getPollinationsImage(keyword: string): string {
-  // Add styling keywords to ensure consistent, cinematic, dark-themed visuals
-  // nologo=true removes the watermark
-  const prompt = `${keyword}, cinematic photography, dark moody lighting, highly detailed, 4k`;
-  const encoded = encodeURIComponent(prompt.trim());
-  const seed = Math.floor(Math.random() * 100000);
-  return `https://image.pollinations.ai/prompt/${encoded}?width=1280&height=720&nologo=true&seed=${seed}`;
+/* ── Picsum seeded fallback ───────────────────────────────────────────────── */
+function getPicsumFallback(keyword: string): string {
+  return `https://picsum.photos/seed/${encodeURIComponent(keyword.toLowerCase().trim() || "music")}/1280/720`;
 }
 
-/**
- * Main image fetch function:
- * 1. Tries Pixabay (if key provided)
- * 2. Tries Pexels (if key provided)
- * 3. Uses Pollinations.ai Generative AI (zero config, highly relevant)
- */
+/* ── Main export ──────────────────────────────────────────────────────────── */
 export async function fetchImage(keyword: string): Promise<string> {
-  const pixabayResult = await fetchPixabay(keyword);
-  if (pixabayResult) return pixabayResult;
+  // 1. Pixabay (fast, relevant, needs free key)
+  const pixabay = await fetchPixabay(keyword);
+  if (pixabay) return pixabay;
 
-  const pexelsResult = await fetchPexels(keyword);
-  if (pexelsResult) return pexelsResult;
+  // 2. Pexels (fast, relevant, needs free key)
+  const pexels = await fetchPexels(keyword);
+  if (pexels) return pexels;
 
-  // Generative AI fallback — creates exactly what the lyrics describe!
-  return getPollinationsImage(keyword);
+  // 3. Wikipedia (free, no key, semantically accurate images)
+  const wiki = await fetchWikipedia(keyword);
+  if (wiki) return wiki;
+
+  // 4. Picsum seeded fallback (always works)
+  return getPicsumFallback(keyword);
 }
 
-/** Forces browser to pre-download image into its cache and returns a Promise */
-export function preCacheImage(url: string): Promise<void> {
-  if (typeof window === "undefined") return Promise.resolve();
-  return new Promise((resolve) => {
-    const img = new window.Image();
-    img.onload  = () => resolve();
-    img.onerror = () => resolve(); // Resolve anyway so it doesn't block the app
-    img.src = url;
-  });
-}
-
-/** Clear the in-memory cache (e.g., between songs) */
+/** Clear the in-memory cache between songs */
 export function clearImageCache(): void {
   imageCache.clear();
 }
